@@ -1,0 +1,80 @@
+name: Build RustDesk Client (custom server)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-win-msvc:
+    runs-on: windows-latest
+    env:
+      RENDEZVOUS_SERVER: ${{ vars.RENDEZVOUS_SERVER }}   # пример: hbbs.example.com:21115
+      RS_PUB_KEY:        ${{ vars.RS_PUB_KEY }}          # содержимое id_ed25519.pub (ssh-ed25519 AAAA...) одной строкой
+      RELAY_SERVER:      ${{ vars.RELAY_SERVER }}        # опционально: hbbr.example.com:21117
+      RUST_BACKTRACE: "1"
+      CARGO_TERM_COLOR: always
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+
+    steps:
+      - name: Checkout sources (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Show repo state
+        shell: pwsh
+        run: |
+          git rev-parse --short HEAD
+          git submodule status
+          dir
+
+      - name: Setup Rust (MSVC)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Flutter doctor
+        shell: pwsh
+        run: flutter doctor -v
+
+      # Устанавливаем тулчейн через cmd (без refreshenv)
+      - name: Install toolchain (cmd)
+        shell: cmd
+        run: |
+          choco install cmake ninja -y --no-progress
+          choco install visualstudio2022buildtools --package-parameters "--add Microsoft.VisualStudio.Workload.VCTools --quiet --norestart" -y --no-progress
+          cmake --version
+          ninja --version
+
+      - name: Print custom vars
+        shell: pwsh
+        run: |
+          echo "RENDEZVOUS_SERVER=$env:RENDEZVOUS_SERVER"
+          if ($env:RELAY_SERVER) { echo "RELAY_SERVER=$env:RELAY_SERVER" }
+          echo "RS_PUB_KEY length: $($env:RS_PUB_KEY.Length)"
+
+      - name: Cargo build (release, MSVC)
+        shell: pwsh
+        env:
+          RENDEZVOUS_SERVER: ${{ env.RENDEZVOUS_SERVER }}
+          RELAY_SERVER:      ${{ env.RELAY_SERVER }}
+          RS_PUB_KEY:        ${{ env.RS_PUB_KEY }}
+        run: |
+          cargo --version
+          rustc --version
+          cargo build --release -v --package rustdesk
+
+      - name: List artifact
+        shell: pwsh
+        run: dir target\release\rustdesk.exe
+
+      - name: Upload artifact (EXE)
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustdesk-windows-msvc
+          path: target/release/rustdesk.exe
