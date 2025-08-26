@@ -1,4 +1,4 @@
-name: Build RustDesk Client (custom server)
+name: Build RustDesk Client (custom server, vcpkg opus)
 
 on:
   workflow_dispatch:
@@ -6,33 +6,38 @@ on:
 jobs:
   build-win-msvc:
     runs-on: windows-latest
+
     env:
-      RENDEZVOUS_SERVER: ${{ vars.RENDEZVOUS_SERVER }}   # пример: hbbs.example.com:21115
-      RS_PUB_KEY:        ${{ vars.RS_PUB_KEY }}          # содержимое id_ed25519.pub (ssh-ed25519 AAAA...) одной строкой
-      RELAY_SERVER:      ${{ vars.RELAY_SERVER }}        # опционально: hbbr.example.com:21117
+      # === ТВОИ ПЕРЕМЕННЫЕ ДОЛЖНЫ БЫТЬ ЗАДАНЫ В REPO → Settings → Actions → Variables ===
+      RENDEZVOUS_SERVER: ${{ vars.RENDEZVOUS_SERVER }}   # hbbs: host:21115
+      RS_PUB_KEY:        ${{ vars.RS_PUB_KEY }}          # публичный ключ из id_ed25519.pub одной строкой (ssh-ed25519 AAAA...)
+      RELAY_SERVER:      ${{ vars.RELAY_SERVER }}        # опционально: hbbr:21117
+      # === Диагностика/стабильность билда ===
       RUST_BACKTRACE: "1"
       CARGO_TERM_COLOR: always
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
 
     steps:
-      - name: Checkout sources (with submodules)
+      # Твой CI-репо (может быть пустым)
+      - name: Checkout this CI repo
         uses: actions/checkout@v4
-        with:
-          submodules: recursive
-          fetch-depth: 0
 
-      - name: Show repo state
-        shell: pwsh
+      # Клонируем ИМЕННО КЛИЕНТ rustdesk + сабмодули
+      - name: Clone RustDesk sources (with submodules)
+        shell: cmd
         run: |
-          git rev-parse --short HEAD
-          git submodule status
-          dir
+          git config --global core.longpaths true
+          git clone --recursive https://github.com/rustdesk/rustdesk.git src
+          cd src && git submodule update --init --recursive
+          cd src && dir
 
+      # Rust toolchain (MSVC)
       - name: Setup Rust (MSVC)
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
 
+      # Flutter (для GUI)
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
@@ -42,8 +47,8 @@ jobs:
         shell: pwsh
         run: flutter doctor -v
 
-      # Устанавливаем тулчейн через cmd (без refreshenv)
-      - name: Install toolchain (cmd)
+      # Инструменты C/C++ (для нативных зависимостей)
+      - name: Install build tools (cmd, no refreshenv)
         shell: cmd
         run: |
           choco install cmake ninja -y --no-progress
@@ -51,30 +56,61 @@ jobs:
           cmake --version
           ninja --version
 
+      # === VCPKG + OPUS ===
+      # magnum-opus на Windows ищет библиотеку Opus через vcpkg.
+      - name: Setup vcpkg and install opus:x64-windows
+        shell: cmd
+        run: |
+          git clone https://github.com/microsoft/vcpkg.git
+          .\vcpkg\bootstrap-vcpkg.bat
+          set VCPKG_ROOT=%CD%\vcpkg
+          set VCPKG_DEFAULT_TRIPLET=x64-windows
+          .\vcpkg\vcpkg.exe install opus:x64-windows
+          # Для последующих шагов пропишем в PATH vcpkg\installed\bin и vcpkg\installed\x64-windows\bin
+          echo %CD%\vcpkg\installed\x64-windows\bin>>%GITHUB_PATH%
+          echo %CD%\vcpkg\installed\bin>>%GITHUB_PATH%
+        # Экспортируем переменные окружения для следующих шагов
+      - name: Export VCPKG env
+        shell: pwsh
+        run: |
+          echo "VCPKG_ROOT=$((Get-Location).Path)\vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          echo "VCPKG_DEFAULT_TRIPLET=x64-windows"       | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          # Часто полезно собирать статикой, но по умолчанию хватит динамики. Если нужен статик:
+          # echo "VCPKGRS_DYNAMIC=0" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      # Печать твоих кастомных переменных (проверка)
       - name: Print custom vars
         shell: pwsh
         run: |
           echo "RENDEZVOUS_SERVER=$env:RENDEZVOUS_SERVER"
           if ($env:RELAY_SERVER) { echo "RELAY_SERVER=$env:RELAY_SERVER" }
           echo "RS_PUB_KEY length: $($env:RS_PUB_KEY.Length)"
+          echo "VCPKG_ROOT=$env:VCPKG_ROOT"
+          echo "VCPKG_DEFAULT_TRIPLET=$env:VCPKG_DEFAULT_TRIPLET"
 
+      # Сборка клиента (релиз)
       - name: Cargo build (release, MSVC)
+        working-directory: src
         shell: pwsh
         env:
           RENDEZVOUS_SERVER: ${{ env.RENDEZVOUS_SERVER }}
           RELAY_SERVER:      ${{ env.RELAY_SERVER }}
           RS_PUB_KEY:        ${{ env.RS_PUB_KEY }}
+          VCPKG_ROOT:        ${{ env.VCPKG_ROOT }}
+          VCPKG_DEFAULT_TRIPLET: ${{ env.VCPKG_DEFAULT_TRIPLET }}
         run: |
           cargo --version
           rustc --version
+          # По совету лога: включим дебаг-инфу для build-deps (улучшает backtrace в случае повтора)
+          $env:CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_DEBUG="true"
           cargo build --release -v --package rustdesk
 
       - name: List artifact
         shell: pwsh
-        run: dir target\release\rustdesk.exe
+        run: dir src\target\release\rustdesk.exe
 
       - name: Upload artifact (EXE)
         uses: actions/upload-artifact@v4
         with:
           name: rustdesk-windows-msvc
-          path: target/release/rustdesk.exe
+          path: src/target/release/rustdesk.exe
