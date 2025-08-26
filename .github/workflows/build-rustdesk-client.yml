@@ -7,12 +7,11 @@ jobs:
   build-win-msvc:
     runs-on: windows-latest
     env:
-      # === ваши переменные из Settings → Actions → Variables ===
-      RENDEZVOUS_SERVER: ${{ vars.RENDEZVOUS_SERVER }}   # hbbs: host:port (например, hbbs.example.com:21115)
-      RS_PUB_KEY:        ${{ vars.RS_PUB_KEY }}          # публичный ключ из id_ed25519.pub (одной строкой: ssh-ed25519 AAAA...)
-      RELAY_SERVER:      ${{ vars.RELAY_SERVER }}        # опционально: hbbr:port (например, hbbr.example.com:21117)
-
-      # Диагностика/стабильность
+      # === ваши переменные в Settings → Actions → Variables ===
+      RENDEZVOUS_SERVER: ${{ vars.RENDEZVOUS_SERVER }}   # hbbs: host:port (напр., hbbs.example.com:21115)
+      RS_PUB_KEY:        ${{ vars.RS_PUB_KEY }}          # публичный ключ из id_ed25519.pub одной строкой (ssh-ed25519 AAAA...)
+      RELAY_SERVER:      ${{ vars.RELAY_SERVER }}        # опц.: hbbr:port (напр., hbbr.example.com:21117)
+      # Диагностика
       RUST_BACKTRACE: "1"
       CARGO_TERM_COLOR: always
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
@@ -21,14 +20,27 @@ jobs:
       - name: Checkout this CI repo
         uses: actions/checkout@v4
 
-      # Клонируем ИМЕННО клиент rustdesk и инициализируем сабмодули
-      - name: Clone RustDesk (client) with submodules
+      # Чистим каталог на случай повтора (убирает '… already exists')
+      - name: Cleanup previous clone
+        shell: cmd
+        run: |
+          if exist rustdesk rmdir /s /q rustdesk
+
+      # Клонируем ИМЕННО клиент rustdesk в ./rustdesk
+      - name: Clone RustDesk (client)
         shell: cmd
         run: |
           git config --global core.longpaths true
-          git clone --recursive https://github.com/rustdesk/rustdesk.git src
-          cd src && git submodule update --init --recursive
-          cd src && dir
+          git clone https://github.com/rustdesk/rustdesk.git rustdesk
+
+      # Инициализация сабмодулей ОТ КОРНЯ репозитория клиента
+      - name: Init submodules (recursive, from repo root)
+        shell: cmd
+        run: |
+          git -C rustdesk submodule sync --recursive
+          git -C rustdesk submodule update --init --recursive
+          dir rustdesk
+          if exist rustdesk\libs dir rustdesk\libs
 
       # Rust (MSVC)
       - name: Setup Rust (MSVC)
@@ -46,7 +58,7 @@ jobs:
         shell: pwsh
         run: flutter doctor -v
 
-      # Инструменты ставим через cmd, чтобы не упереться в refreshenv
+      # Инструменты: ставим через cmd (без refreshenv)
       - name: Install build tools (cmd)
         shell: cmd
         run: |
@@ -55,7 +67,7 @@ jobs:
           cmake --version
           ninja --version
 
-      # vcpkg + Opus: нужно для зависимости magnum-opus
+      # vcpkg + Opus для magnum-opus
       - name: Setup vcpkg and install opus:x64-windows
         shell: cmd
         run: |
@@ -65,6 +77,7 @@ jobs:
           echo %CD%\vcpkg\installed\x64-windows\bin>>%GITHUB_PATH%
           echo %CD%\vcpkg\installed\bin>>%GITHUB_PATH%
 
+      # Быстрая проверка переменных
       - name: Print custom vars
         shell: pwsh
         run: |
@@ -72,9 +85,9 @@ jobs:
           if ($env:RELAY_SERVER) { echo "RELAY_SERVER=$env:RELAY_SERVER" }
           echo "RS_PUB_KEY length: $($env:RS_PUB_KEY.Length)"
 
-      # В ЭТОМ ЖЕ шаге задаём VCPKG_ROOT/TRIPLET, чтобы build.rs точно их увидел
+      # Сборка: задаём VCPKG_ROOT/TRIPLET прямо в этом шаге
       - name: Build RustDesk (release, MSVC) with vcpkg env
-        working-directory: src
+        working-directory: rustdesk
         shell: pwsh
         env:
           RENDEZVOUS_SERVER: ${{ env.RENDEZVOUS_SERVER }}
@@ -83,7 +96,7 @@ jobs:
         run: |
           $env:VCPKG_ROOT = Join-Path $env:GITHUB_WORKSPACE "vcpkg"
           $env:VCPKG_DEFAULT_TRIPLET = "x64-windows"
-          # Если хотите статическую линковку через vcpkg-rs, раскомментируйте:
+          # Если хотите статическую линковку через vcpkg-rs:
           # $env:VCPKGRS_DYNAMIC = "0"
 
           Write-Host "VCPKG_ROOT=$env:VCPKG_ROOT"
@@ -91,17 +104,15 @@ jobs:
 
           cargo --version
           rustc --version
-          # Улучшенный backtrace для build-deps (как советует cargo):
           $env:CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_DEBUG = "true"
-
           cargo build --release -v --package rustdesk
 
       - name: List artifact
         shell: pwsh
-        run: dir src\target\release\rustdesk.exe
+        run: dir rustdesk\target\release\rustdesk.exe
 
       - name: Upload artifact (EXE)
         uses: actions/upload-artifact@v4
         with:
           name: rustdesk-windows-msvc
-          path: src/target/release/rustdesk.exe
+          path: rustdesk/target/release/rustdesk.exe
