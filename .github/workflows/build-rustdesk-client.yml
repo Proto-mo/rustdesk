@@ -1,4 +1,4 @@
-name: Build RustDesk Client (custom server, vcpkg opus static)
+name: Build RustDesk Client (custom server, vcpkg opus static, VS env)
 
 on:
   workflow_dispatch:
@@ -7,11 +7,9 @@ jobs:
   build-win-msvc:
     runs-on: windows-latest
     env:
-      # === ваши переменные в Settings → Actions → Variables ===
-      RENDEZVOUS_SERVER: ${{ vars.RENDEZVOUS_SERVER }}   # hbbs: host:port (например, hbbs.example.com:21115)
-      RS_PUB_KEY:        ${{ vars.RS_PUB_KEY }}          # публичный ключ из id_ed25519.pub (ssh-ed25519 AAAA...) одной строкой
-      RELAY_SERVER:      ${{ vars.RELAY_SERVER }}        # опц.: hbbr:port (например, hbbr.example.com:21117)
-      # Диагностика
+      RENDEZVOUS_SERVER: ${{ vars.RENDEZVOUS_SERVER }}  # hbbs: host:21115
+      RS_PUB_KEY:        ${{ vars.RS_PUB_KEY }}         # ssh-ed25519 AAAA... (одной строкой)
+      RELAY_SERVER:      ${{ vars.RELAY_SERVER }}       # hbbr: host:21117 (опционально)
       RUST_BACKTRACE: "1"
       CARGO_TERM_COLOR: always
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
@@ -20,35 +18,30 @@ jobs:
       - name: Checkout this CI repo
         uses: actions/checkout@v4
 
-      # Чистим на случай повтора
       - name: Cleanup previous clone
         shell: cmd
         run: |
           if exist rustdesk rmdir /s /q rustdesk
+          if exist vcpkg rmdir /s /q vcpkg
 
-      # Клонируем ИМЕННО клиент rustdesk в ./rustdesk
       - name: Clone RustDesk (client)
         shell: cmd
         run: |
           git config --global core.longpaths true
           git clone https://github.com/rustdesk/rustdesk.git rustdesk
 
-      # Сабмодули из корня клиента
       - name: Init submodules (recursive, from repo root)
         shell: cmd
         run: |
           git -C rustdesk submodule sync --recursive
           git -C rustdesk submodule update --init --recursive
-          dir rustdesk
           if exist rustdesk\libs dir rustdesk\libs
 
-      # Rust (MSVC)
       - name: Setup Rust (MSVC)
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
 
-      # Flutter для GUI
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
@@ -58,7 +51,6 @@ jobs:
         shell: pwsh
         run: flutter doctor -v
 
-      # Инструменты: ставим через cmd (без refreshenv)
       - name: Install build tools (cmd)
         shell: cmd
         run: |
@@ -67,49 +59,44 @@ jobs:
           cmake --version
           ninja --version
 
-      # vcpkg + Opus: СТАВИМ ОБА ТРИПЛЕТА (динамический и статический)
-      - name: Setup vcpkg and install opus:x64-windows + x64-windows-static
+      - name: Setup vcpkg and install opus (dynamic + static)
         shell: cmd
         run: |
           git clone https://github.com/microsoft/vcpkg.git
           .\vcpkg\bootstrap-vcpkg.bat
+          rem Ставим обе вариации, чтобы точно были include/lib под static:
           .\vcpkg\vcpkg.exe install opus:x64-windows opus:x64-windows-static
-          echo %CD%\vcpkg\installed\x64-windows\bin>>%GITHUB_PATH%
-          echo %CD%\vcpkg\installed\bin>>%GITHUB_PATH%
 
-      - name: Print custom vars
-        shell: pwsh
-        run: |
-          echo "RENDEZVOUS_SERVER=$env:RENDEZVOUS_SERVER"
-          if ($env:RELAY_SERVER) { echo "RELAY_SERVER=$env:RELAY_SERVER" }
-          echo "RS_PUB_KEY length: $($env:RS_PUB_KEY.Length)"
-
-      # Сборка: жёстко задаём статический триплет, чтобы magnum-opus нашёл заголовки в x64-windows-static\include
-      - name: Build RustDesk (release, MSVC) with vcpkg env (static)
+      # ВАЖНО: тут используем один cmd-шаг,
+      # 1) активируем VS среду (VsDevCmd.bat),
+      # 2) задаём VCPKG_* и BINDGEN_EXTRA_CLANG_ARGS,
+      # 3) вызываем cargo build.
+      - name: Build RustDesk (release, MSVC) inside VS DevCmd + vcpkg env
+        shell: cmd
         working-directory: rustdesk
-        shell: pwsh
         env:
           RENDEZVOUS_SERVER: ${{ env.RENDEZVOUS_SERVER }}
           RELAY_SERVER:      ${{ env.RELAY_SERVER }}
           RS_PUB_KEY:        ${{ env.RS_PUB_KEY }}
         run: |
-          $env:VCPKG_ROOT = Join-Path $env:GITHUB_WORKSPACE "vcpkg"
-          $env:VCPKG_DEFAULT_TRIPLET = "x64-windows-static"
-          $env:VCPKG_TARGET_TRIPLET  = "x64-windows-static"
-          $env:VCPKGRS_DYNAMIC       = "0"   # форсируем статическую линковку через vcpkg-rs
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -arch=x64
 
-          Write-Host "VCPKG_ROOT=$env:VCPKG_ROOT"
-          Write-Host "VCPKG_DEFAULT_TRIPLET=$env:VCPKG_DEFAULT_TRIPLET"
-          Write-Host "VCPKG_TARGET_TRIPLET=$env:VCPKG_TARGET_TRIPLET"
+          set VCPKG_ROOT=%GITHUB_WORKSPACE%\vcpkg
+          set VCPKG_DEFAULT_TRIPLET=x64-windows-static
+          set VCPKG_TARGET_TRIPLET=x64-windows-static
+          rem Прокинем include vcpkg для bindgen/clang:
+          set BINDGEN_EXTRA_CLANG_ARGS=-I%VCPKG_ROOT%\installed\%VCPKG_TARGET_TRIPLET%\include
 
-          cargo --version
+          echo VCPKG_ROOT=%VCPKG_ROOT%
+          echo VCPKG_DEFAULT_TRIPLET=%VCPKG_DEFAULT_TRIPLET%
+          echo VCPKG_TARGET_TRIPLET=%VCPKG_TARGET_TRIPLET%
+          echo BINDGEN_EXTRA_CLANG_ARGS=%BINDGEN_EXTRA_CLANG_ARGS%
+
           rustc --version
-          $env:CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_DEBUG = "true"
-          cargo build --release -v --package rustdesk
+          cargo --version
+          set CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_DEBUG=true
 
-      - name: List artifact
-        shell: pwsh
-        run: dir rustdesk\target\release\rustdesk.exe
+          cargo build --release -v --package rustdesk
 
       - name: Upload artifact (EXE)
         uses: actions/upload-artifact@v4
