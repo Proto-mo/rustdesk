@@ -1,4 +1,4 @@
-name: Build RustDesk Client (custom server, vcpkg opus)
+name: Build RustDesk Client (custom server, vcpkg opus static)
 
 on:
   workflow_dispatch:
@@ -8,9 +8,9 @@ jobs:
     runs-on: windows-latest
     env:
       # === ваши переменные в Settings → Actions → Variables ===
-      RENDEZVOUS_SERVER: ${{ vars.RENDEZVOUS_SERVER }}   # hbbs: host:port (напр., hbbs.example.com:21115)
-      RS_PUB_KEY:        ${{ vars.RS_PUB_KEY }}          # публичный ключ из id_ed25519.pub одной строкой (ssh-ed25519 AAAA...)
-      RELAY_SERVER:      ${{ vars.RELAY_SERVER }}        # опц.: hbbr:port (напр., hbbr.example.com:21117)
+      RENDEZVOUS_SERVER: ${{ vars.RENDEZVOUS_SERVER }}   # hbbs: host:port (например, hbbs.example.com:21115)
+      RS_PUB_KEY:        ${{ vars.RS_PUB_KEY }}          # публичный ключ из id_ed25519.pub (ssh-ed25519 AAAA...) одной строкой
+      RELAY_SERVER:      ${{ vars.RELAY_SERVER }}        # опц.: hbbr:port (например, hbbr.example.com:21117)
       # Диагностика
       RUST_BACKTRACE: "1"
       CARGO_TERM_COLOR: always
@@ -20,7 +20,7 @@ jobs:
       - name: Checkout this CI repo
         uses: actions/checkout@v4
 
-      # Чистим каталог на случай повтора (убирает '… already exists')
+      # Чистим на случай повтора
       - name: Cleanup previous clone
         shell: cmd
         run: |
@@ -33,7 +33,7 @@ jobs:
           git config --global core.longpaths true
           git clone https://github.com/rustdesk/rustdesk.git rustdesk
 
-      # Инициализация сабмодулей ОТ КОРНЯ репозитория клиента
+      # Сабмодули из корня клиента
       - name: Init submodules (recursive, from repo root)
         shell: cmd
         run: |
@@ -67,17 +67,16 @@ jobs:
           cmake --version
           ninja --version
 
-      # vcpkg + Opus для magnum-opus
-      - name: Setup vcpkg and install opus:x64-windows
+      # vcpkg + Opus: СТАВИМ ОБА ТРИПЛЕТА (динамический и статический)
+      - name: Setup vcpkg and install opus:x64-windows + x64-windows-static
         shell: cmd
         run: |
           git clone https://github.com/microsoft/vcpkg.git
           .\vcpkg\bootstrap-vcpkg.bat
-          .\vcpkg\vcpkg.exe install opus:x64-windows
+          .\vcpkg\vcpkg.exe install opus:x64-windows opus:x64-windows-static
           echo %CD%\vcpkg\installed\x64-windows\bin>>%GITHUB_PATH%
           echo %CD%\vcpkg\installed\bin>>%GITHUB_PATH%
 
-      # Быстрая проверка переменных
       - name: Print custom vars
         shell: pwsh
         run: |
@@ -85,8 +84,8 @@ jobs:
           if ($env:RELAY_SERVER) { echo "RELAY_SERVER=$env:RELAY_SERVER" }
           echo "RS_PUB_KEY length: $($env:RS_PUB_KEY.Length)"
 
-      # Сборка: задаём VCPKG_ROOT/TRIPLET прямо в этом шаге
-      - name: Build RustDesk (release, MSVC) with vcpkg env
+      # Сборка: жёстко задаём статический триплет, чтобы magnum-opus нашёл заголовки в x64-windows-static\include
+      - name: Build RustDesk (release, MSVC) with vcpkg env (static)
         working-directory: rustdesk
         shell: pwsh
         env:
@@ -95,12 +94,13 @@ jobs:
           RS_PUB_KEY:        ${{ env.RS_PUB_KEY }}
         run: |
           $env:VCPKG_ROOT = Join-Path $env:GITHUB_WORKSPACE "vcpkg"
-          $env:VCPKG_DEFAULT_TRIPLET = "x64-windows"
-          # Если хотите статическую линковку через vcpkg-rs:
-          # $env:VCPKGRS_DYNAMIC = "0"
+          $env:VCPKG_DEFAULT_TRIPLET = "x64-windows-static"
+          $env:VCPKG_TARGET_TRIPLET  = "x64-windows-static"
+          $env:VCPKGRS_DYNAMIC       = "0"   # форсируем статическую линковку через vcpkg-rs
 
           Write-Host "VCPKG_ROOT=$env:VCPKG_ROOT"
           Write-Host "VCPKG_DEFAULT_TRIPLET=$env:VCPKG_DEFAULT_TRIPLET"
+          Write-Host "VCPKG_TARGET_TRIPLET=$env:VCPKG_TARGET_TRIPLET"
 
           cargo --version
           rustc --version
