@@ -1,4 +1,4 @@
-name: Build RustDesk Client (custom server, vcpkg classic+manifest via lukka, MSVC)
+name: Build RustDesk Client (custom server, vcpkg classic+manifest via lukka, MSVC1)
 
 on:
   workflow_dispatch:
