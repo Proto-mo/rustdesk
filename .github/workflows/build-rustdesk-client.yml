@@ -1,4 +1,4 @@
-name: Build RustDesk Client (custom server, vcpkg auto-fallback, MSVC)
+name: Build RustDesk Client (custom server, vcpkg manifest, MSVC)
 
 on:
   workflow_dispatch:
@@ -7,9 +7,10 @@ jobs:
   build-win-msvc:
     runs-on: windows-latest
     env:
-      RENDEZVOUS_SERVER: ${{ vars.RENDEZVOUS_SERVER }}   # hbbs: host:port (например, hbbs.example.com:21115)
+      # ваши переменные в Settings → Actions → Variables:
+      RENDEZVOUS_SERVER: ${{ vars.RENDEZVOUS_SERVER }}   # hbbs: host:port, напр. hbbs.example.com:21115
       RS_PUB_KEY:        ${{ vars.RS_PUB_KEY }}          # ssh-ed25519 AAAA... (одной строкой)
-      RELAY_SERVER:      ${{ vars.RELAY_SERVER }}        # опционально: hbbr.example.com:21117
+      RELAY_SERVER:      ${{ vars.RELAY_SERVER }}        # опц.: hbbr:port, напр. hbbr.example.com:21117
       RUST_BACKTRACE: "1"
       CARGO_TERM_COLOR: always
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
@@ -18,14 +19,13 @@ jobs:
       - name: Checkout this CI repo
         uses: actions/checkout@v4
 
-      # Полная зачистка
       - name: Cleanup previous run
         shell: cmd
         run: |
           if exist rustdesk rmdir /s /q rustdesk
           if exist _vcpkg rmdir /s /q _vcpkg
 
-      # Клонируем КЛИЕНТ rustdesk
+      # Клонируем ИМЕННО клиент rustdesk и инициализируем сабмодули
       - name: Clone RustDesk (client) + submodules
         shell: cmd
         run: |
@@ -34,13 +34,11 @@ jobs:
           git -C rustdesk submodule sync --recursive
           git -C rustdesk submodule update --init --recursive
 
-      # Rust (MSVC)
       - name: Setup Rust (MSVC)
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
 
-      # Flutter для GUI
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
@@ -50,7 +48,6 @@ jobs:
         shell: pwsh
         run: flutter doctor -v
 
-      # Инструменты C/C++
       - name: Install build tools (cmd)
         shell: cmd
         run: |
@@ -59,29 +56,42 @@ jobs:
           cmake --version
           ninja --version
 
-      # vcpkg — ставим В КАТАЛОГ _vcpkg в корне workspace
-      - name: Setup vcpkg and install deps (opus static+dynamic, libvpx/libyuv static)
+      # Ставим vcpkg в _vcpkg
+      - name: Bootstrap vcpkg
         shell: cmd
         run: |
           git clone https://github.com/microsoft/vcpkg.git _vcpkg
           call _vcpkg\bootstrap-vcpkg.bat
-          _vcpkg\vcpkg.exe install opus:x64-windows opus:x64-windows-static libvpx:x64-windows-static libyuv:x64-windows-static
-          rem Покажем что реально появилось
-          dir _vcpkg\installed
-          if exist _vcpkg\installed\x64-windows\include\opus       dir _vcpkg\installed\x64-windows\include\opus
-          if exist _vcpkg\installed\x64-windows-static\include\opus dir _vcpkg\installed\x64-windows-static\include\opus
 
-      # Проверка наличия заголовков статического opus
-      - name: Verify Opus headers (static)
+      # MANIFEST MODE: установка зависимостей из rustdesk/vcpkg.json
+      # 1) статический триплет
+      - name: vcpkg install (manifest, x64-windows-static)
+        shell: cmd
+        working-directory: rustdesk
+        run: |
+          ..\_vcpkg\vcpkg.exe install --triplet x64-windows-static --vcpkg-root ..\_vcpkg
+
+      # 2) динамический триплет (на случай fallback)
+      - name: vcpkg install (manifest, x64-windows)
+        shell: cmd
+        working-directory: rustdesk
+        run: |
+          ..\_vcpkg\vcpkg.exe install --triplet x64-windows --vcpkg-root ..\_vcpkg
+
+      # Проверяем, что заголовки Opus реально появились
+      - name: Verify Opus headers presence
         shell: cmd
         run: |
-          if not exist _vcpkg\installed\x64-windows-static\include\opus\opus_multistream.h (
-            echo WARNING: static opus headers not found, will fallback to dynamic at build step.
-          ) else (
+          if exist _vcpkg\installed\x64-windows-static\include\opus\opus_multistream.h (
             echo OK: static opus headers present
+          ) else if exist _vcpkg\installed\x64-windows\include\opus\opus_multistream.h (
+            echo OK: dynamic opus headers present (fallback will be used)
+          ) else (
+            echo FATAL: Opus headers not found in either triplet.
+            dir _vcpkg\installed
+            exit /b 1
           )
 
-      # Печать ваших переменных (проверка)
       - name: Print custom vars
         shell: pwsh
         run: |
@@ -89,8 +99,8 @@ jobs:
           if ($env:RELAY_SERVER) { echo "RELAY_SERVER=$env:RELAY_SERVER" }
           echo "RS_PUB_KEY length: $($env:RS_PUB_KEY.Length)"
 
-      # Сборка В ОДНОМ cmd-шаге: VsDevCmd + vcpkg + авто-fallBack
-      - name: Build RustDesk (release, MSVC) with vcpkg auto-fallback
+      # Сборка в одном cmd-шаге: VsDevCmd + выбор триплета по наличию заголовков
+      - name: Build RustDesk (release, MSVC) in VS DevCmd + vcpkg env
         shell: cmd
         working-directory: rustdesk
         env:
@@ -98,36 +108,29 @@ jobs:
           RELAY_SERVER:      ${{ env.RELAY_SERVER }}
           RS_PUB_KEY:        ${{ env.RS_PUB_KEY }}
         run: |
-          rem 1) Инициализируем MSVC/SDK
+          rem 1) Активируем MSVC/SDK среду
           if exist "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" (
             call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -arch=x64
           ) else (
             call "C:\Program Files\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat" -arch=x64
           )
 
-          rem 2) Указываем vcpkg из ПРЕДСКАЗУЕМОГО каталога _vcpkg
+          rem 2) VCPKG_ROOT → _vcpkg
           set VCPKG_ROOT=%GITHUB_WORKSPACE%\_vcpkg
-          set STATIC_TRIPLET=x64-windows-static
-          set DYNAMIC_TRIPLET=x64-windows
 
-          rem 3) Автоматический выбор: если есть static-headers — статическая сборка, иначе — динамическая
-          if exist "%VCPKG_ROOT%\installed\%STATIC_TRIPLET%\include\opus\opus_multistream.h" (
+          rem 3) Выбор статик/динамик по наличию заголовков
+          if exist "%VCPKG_ROOT%\installed\x64-windows-static\include\opus\opus_multistream.h" (
             echo === Using STATIC triplet ===
-            set VCPKG_DEFAULT_TRIPLET=%STATIC_TRIPLET%
-            set VCPKG_TARGET_TRIPLET=%STATIC_TRIPLET%
+            set VCPKG_DEFAULT_TRIPLET=x64-windows-static
+            set VCPKG_TARGET_TRIPLET=x64-windows-static
             set VCPKGRS_DYNAMIC=0
-            set BINDGEN_EXTRA_CLANG_ARGS=-I%VCPKG_ROOT%\installed\%STATIC_TRIPLET%\include
+            set BINDGEN_EXTRA_CLANG_ARGS=-I%VCPKG_ROOT%\installed\x64-windows-static\include
           ) else (
-            echo === Static headers not found, FALLBACK to DYNAMIC triplet ===
-            if not exist "%VCPKG_ROOT%\installed\%DYNAMIC_TRIPLET%\include\opus\opus_multistream.h" (
-              echo FATAL: Opus headers not found for dynamic triplet either.
-              dir "%VCPKG_ROOT%\installed"
-              exit /b 1
-            )
-            set VCPKG_DEFAULT_TRIPLET=%DYNAMIC_TRIPLET%
-            set VCPKG_TARGET_TRIPLET=%DYNAMIC_TRIPLET%
+            echo === Using DYNAMIC triplet (fallback) ===
+            set VCPKG_DEFAULT_TRIPLET=x64-windows
+            set VCPKG_TARGET_TRIPLET=x64-windows
             set VCPKGRS_DYNAMIC=1
-            set BINDGEN_EXTRA_CLANG_ARGS=-I%VCPKG_ROOT%\installed\%DYNAMIC_TRIPLET%\include
+            set BINDGEN_EXTRA_CLANG_ARGS=-I%VCPKG_ROOT%\installed\x64-windows\include
           )
 
           echo VCPKG_ROOT=%VCPKG_ROOT%
