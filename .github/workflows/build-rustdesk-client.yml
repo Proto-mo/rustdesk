@@ -7,10 +7,9 @@ jobs:
   build-win-msvc:
     runs-on: windows-latest
     env:
-      # Задай в Settings → Actions → Variables:
-      RENDEZVOUS_SERVER: ${{ vars.RENDEZVOUS_SERVER }}   # напр.: hbbs.example.com:21115
+      RENDEZVOUS_SERVER: ${{ vars.RENDEZVOUS_SERVER }}   # hbbs: host:port (например, hbbs.example.com:21115)
       RS_PUB_KEY:        ${{ vars.RS_PUB_KEY }}          # ssh-ed25519 AAAA... (одной строкой)
-      RELAY_SERVER:      ${{ vars.RELAY_SERVER }}        # опц.: hbbr.example.com:21117
+      RELAY_SERVER:      ${{ vars.RELAY_SERVER }}        # опционально: hbbr.example.com:21117
       RUST_BACKTRACE: "1"
       CARGO_TERM_COLOR: always
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
@@ -19,12 +18,14 @@ jobs:
       - name: Checkout this CI repo
         uses: actions/checkout@v4
 
+      # Полная зачистка
       - name: Cleanup previous run
         shell: cmd
         run: |
           if exist rustdesk rmdir /s /q rustdesk
-          if exist vcpkg rmdir /s /q vcpkg
+          if exist _vcpkg rmdir /s /q _vcpkg
 
+      # Клонируем КЛИЕНТ rustdesk
       - name: Clone RustDesk (client) + submodules
         shell: cmd
         run: |
@@ -33,11 +34,13 @@ jobs:
           git -C rustdesk submodule sync --recursive
           git -C rustdesk submodule update --init --recursive
 
+      # Rust (MSVC)
       - name: Setup Rust (MSVC)
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
 
+      # Flutter для GUI
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
@@ -47,6 +50,7 @@ jobs:
         shell: pwsh
         run: flutter doctor -v
 
+      # Инструменты C/C++
       - name: Install build tools (cmd)
         shell: cmd
         run: |
@@ -55,18 +59,29 @@ jobs:
           cmake --version
           ninja --version
 
-      - name: Setup vcpkg and install deps (static + dynamic opus)
+      # vcpkg — ставим В КАТАЛОГ _vcpkg в корне workspace
+      - name: Setup vcpkg and install deps (opus static+dynamic, libvpx/libyuv static)
         shell: cmd
         run: |
-          git clone https://github.com/microsoft/vcpkg.git
-          .\vcpkg\bootstrap-vcpkg.bat
-          rem opus для обоих триплетов, libvpx/libyuv — статические
-          .\vcpkg\vcpkg.exe install opus:x64-windows opus:x64-windows-static libvpx:x64-windows-static libyuv:x64-windows-static
-          rem Показать, что реально установилось
-          dir vcpkg\installed
-          if exist vcpkg\installed\x64-windows-static\include\opus dir vcpkg\installed\x64-windows-static\include\opus
-          if exist vcpkg\installed\x64-windows\include\opus       dir vcpkg\installed\x64-windows\include\opus
+          git clone https://github.com/microsoft/vcpkg.git _vcpkg
+          call _vcpkg\bootstrap-vcpkg.bat
+          _vcpkg\vcpkg.exe install opus:x64-windows opus:x64-windows-static libvpx:x64-windows-static libyuv:x64-windows-static
+          rem Покажем что реально появилось
+          dir _vcpkg\installed
+          if exist _vcpkg\installed\x64-windows\include\opus       dir _vcpkg\installed\x64-windows\include\opus
+          if exist _vcpkg\installed\x64-windows-static\include\opus dir _vcpkg\installed\x64-windows-static\include\opus
 
+      # Проверка наличия заголовков статического opus
+      - name: Verify Opus headers (static)
+        shell: cmd
+        run: |
+          if not exist _vcpkg\installed\x64-windows-static\include\opus\opus_multistream.h (
+            echo WARNING: static opus headers not found, will fallback to dynamic at build step.
+          ) else (
+            echo OK: static opus headers present
+          )
+
+      # Печать ваших переменных (проверка)
       - name: Print custom vars
         shell: pwsh
         run: |
@@ -74,7 +89,8 @@ jobs:
           if ($env:RELAY_SERVER) { echo "RELAY_SERVER=$env:RELAY_SERVER" }
           echo "RS_PUB_KEY length: $($env:RS_PUB_KEY.Length)"
 
-      - name: Build RustDesk (release, MSVC) with auto static→dynamic fallback
+      # Сборка В ОДНОМ cmd-шаге: VsDevCmd + vcpkg + авто-fallBack
+      - name: Build RustDesk (release, MSVC) with vcpkg auto-fallback
         shell: cmd
         working-directory: rustdesk
         env:
@@ -82,19 +98,19 @@ jobs:
           RELAY_SERVER:      ${{ env.RELAY_SERVER }}
           RS_PUB_KEY:        ${{ env.RS_PUB_KEY }}
         run: |
-          rem 1) Активируем MSVC/SDK
+          rem 1) Инициализируем MSVC/SDK
           if exist "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" (
             call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -arch=x64
           ) else (
             call "C:\Program Files\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat" -arch=x64
           )
 
-          rem 2) Базовые переменные
-          set VCPKG_ROOT=%GITHUB_WORKSPACE%\vcpkg
+          rem 2) Указываем vcpkg из ПРЕДСКАЗУЕМОГО каталога _vcpkg
+          set VCPKG_ROOT=%GITHUB_WORKSPACE%\_vcpkg
           set STATIC_TRIPLET=x64-windows-static
           set DYNAMIC_TRIPLET=x64-windows
 
-          rem 3) Если есть статические заголовки opus — собираем статически, иначе падаем на динамику
+          rem 3) Автоматический выбор: если есть static-headers — статическая сборка, иначе — динамическая
           if exist "%VCPKG_ROOT%\installed\%STATIC_TRIPLET%\include\opus\opus_multistream.h" (
             echo === Using STATIC triplet ===
             set VCPKG_DEFAULT_TRIPLET=%STATIC_TRIPLET%
@@ -120,7 +136,7 @@ jobs:
           echo VCPKGRS_DYNAMIC=%VCPKGRS_DYNAMIC%
           echo BINDGEN_EXTRA_CLANG_ARGS=%BINDGEN_EXTRA_CLANG_ARGS%
 
-          rem 4) Сборка
+          rem 4) Сборка клиента
           rustc --version
           cargo --version
           set CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_DEBUG=true
