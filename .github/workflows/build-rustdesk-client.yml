@@ -7,12 +7,11 @@ jobs:
   build-win-msvc:
     runs-on: windows-latest
     env:
-      # === ваши переменные из Settings → Actions → Variables ===
-      RENDEZVOUS_SERVER: ${{ vars.RENDEZVOUS_SERVER }}   # hbbs: host:port (напр., hbbs.example.com:21115)
-      RS_PUB_KEY:        ${{ vars.RS_PUB_KEY }}          # публичный ключ одной строкой: ssh-ed25519 AAAA...
-      RELAY_SERVER:      ${{ vars.RELAY_SERVER }}        # опционально: hbbr:port (напр., hbbr.example.com:21117)
-
-      # Диагностика/стабильность
+      # === ваши переменные в Settings → Actions → Variables ===
+      RENDEZVOUS_SERVER: ${{ vars.RENDEZVOUS_SERVER }}   # напр.: hbbs.example.com:21115
+      RS_PUB_KEY:        ${{ vars.RS_PUB_KEY }}          # ssh-ed25519 AAAA... (одной строкой)
+      RELAY_SERVER:      ${{ vars.RELAY_SERVER }}        # опц.: hbbr.example.com:21117
+      # Диагностика
       RUST_BACKTRACE: "1"
       CARGO_TERM_COLOR: always
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
@@ -21,8 +20,8 @@ jobs:
       - name: Checkout this CI repo
         uses: actions/checkout@v4
 
-      # Чистим каталоги на случай повтора
-      - name: Cleanup previous clone
+      # Полная зачистка — чтобы не было повторных rustdesk/rustdesk/... и битого vcpkg
+      - name: Cleanup previous run
         shell: cmd
         run: |
           if exist rustdesk rmdir /s /q rustdesk
@@ -36,7 +35,6 @@ jobs:
           git clone https://github.com/rustdesk/rustdesk.git rustdesk
           git -C rustdesk submodule sync --recursive
           git -C rustdesk submodule update --init --recursive
-          if exist rustdesk\libs dir rustdesk\libs
 
       # Rust (MSVC)
       - name: Setup Rust (MSVC)
@@ -54,7 +52,7 @@ jobs:
         shell: pwsh
         run: flutter doctor -v
 
-      # Инструменты C/C++ ставим через cmd (без refreshenv)
+      # Инструменты C/C++ через cmd (без refreshenv)
       - name: Install build tools (cmd)
         shell: cmd
         run: |
@@ -63,15 +61,29 @@ jobs:
           cmake --version
           ninja --version
 
-      # vcpkg + СТАТИЧЕСКИЕ зависимости (для magnum-opus/scrap и т.п.)
-      - name: Setup vcpkg and install static deps (opus, libvpx, libyuv)
+      # vcpkg + СТАТИЧЕСКИЕ зависимости
+      - name: Setup vcpkg and install static deps
         shell: cmd
         run: |
           git clone https://github.com/microsoft/vcpkg.git
           .\vcpkg\bootstrap-vcpkg.bat
+          rem Ставим статические порты, нужные для magnum-opus и scrap:
           .\vcpkg\vcpkg.exe install opus:x64-windows-static libvpx:x64-windows-static libyuv:x64-windows-static
 
-      # Печать ваших переменных (быстрая проверка)
+      # Sanity-check: проверим, что заголовки Opus реально на месте
+      - name: Verify Opus headers exist
+        shell: cmd
+        run: |
+          if not exist vcpkg\installed\x64-windows-static\include\opus\opus_multistream.h (
+            echo FATAL: vcpkg opus headers not found in x64-windows-static\include\opus
+            dir vcpkg\installed\x64-windows-static\include
+            exit /b 1
+          ) else (
+            echo OK: opus headers present
+            dir vcpkg\installed\x64-windows-static\include\opus
+          )
+
+      # Печать ваших переменных
       - name: Print custom vars
         shell: pwsh
         run: |
@@ -79,8 +91,8 @@ jobs:
           if ($env:RELAY_SERVER) { echo "RELAY_SERVER=$env:RELAY_SERVER" }
           echo "RS_PUB_KEY length: $($env:RS_PUB_KEY.Length)"
 
-      # Критично: один cmd-шаг — активируем VS среду, задаём VCPKG и инклюды для bindgen/clang, собираем
-      - name: Build RustDesk (release, MSVC) inside VS DevCmd + vcpkg static env
+      # Сборка: один cmd-шаг — активируем VS среду, задаём vcpkg и include для bindgen/clang, собираем
+      - name: Build RustDesk (release, MSVC) in VS DevCmd + vcpkg static env
         shell: cmd
         working-directory: rustdesk
         env:
@@ -88,19 +100,19 @@ jobs:
           RELAY_SERVER:      ${{ env.RELAY_SERVER }}
           RS_PUB_KEY:        ${{ env.RS_PUB_KEY }}
         run: |
-          rem 1) Инициализируем MSVC/Windows SDK окружение
+          rem 1) MSVC/Windows SDK окружение
           if exist "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" (
             call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -arch=x64
           ) else (
             call "C:\Program Files\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat" -arch=x64
           )
 
-          rem 2) Настраиваем vcpkg для статической сборки
+          rem 2) vcpkg (статический триплет)
           set VCPKG_ROOT=%GITHUB_WORKSPACE%\vcpkg
           set VCPKG_DEFAULT_TRIPLET=x64-windows-static
           set VCPKG_TARGET_TRIPLET=x64-windows-static
 
-          rem 3) Bindgen/clang должны видеть заголовки vcpkg
+          rem 3) bindgen/clang должны видеть инклюды vcpkg
           set BINDGEN_EXTRA_CLANG_ARGS=-I%VCPKG_ROOT%\installed\%VCPKG_TARGET_TRIPLET%\include
 
           echo VCPKG_ROOT=%VCPKG_ROOT%
