@@ -53,11 +53,11 @@ jobs:
           cmake --version
           ninja --version
 
-      # vcpkg через lukka/run-vcpkg
+      # vcpkg bootstrap/cache via lukka
       - name: setup-vcpkg (x64-windows-static)
         uses: lukka/run-vcpkg@v11
         with:
-          vcpkgGitCommitId: ''
+          vcpkgGitCommitId: ''                 # optional pin
           vcpkgDirectory: ${{ runner.temp }}\vcpkg
           vcpkgJsonGlob: rustdesk/vcpkg.json
           triplet: x64-windows-static
@@ -72,16 +72,54 @@ jobs:
           triplet: x64-windows
           appendedCacheKey: rustdesk-dynamic
 
-      - name: Print custom vars
+      # ⬇️ ЯВНО ставим зависимости в manifest-режиме из rustdesk/ (обеe триплета), чтобы точно появились headers под %VCPKG_ROOT%\installed
+      - name: vcpkg install (manifest, static)
+        shell: cmd
+        working-directory: rustdesk
+        run: |
+          "%VCPKG_ROOT%\vcpkg.exe" install --triplet x64-windows-static
+          echo ---- Installed (static) ----
+          if exist "%VCPKG_ROOT%\installed\x64-windows-static\include\opus" dir "%VCPKG_ROOT%\installed\x64-windows-static\include\opus"
+
+      - name: vcpkg install (manifest, dynamic)
+        shell: cmd
+        working-directory: rustdesk
+        run: |
+          "%VCPKG_ROOT%\vcpkg.exe" install --triplet x64-windows
+          echo ---- Installed (dynamic) ----
+          if exist "%VCPKG_ROOT%\installed\x64-windows\include\opus" dir "%VCPKG_ROOT%\installed\x64-windows\include\opus"
+
+      # Автопоиск заголовков opus_multistream.h и выбор триплета
+      - name: Locate Opus headers and export env
         shell: pwsh
         run: |
-          echo "RENDEZVOUS_SERVER=$env:RENDEZVOUS_SERVER"
-          if ($env:RELAY_SERVER) { echo "RELAY_SERVER=$env:RELAY_SERVER" }
-          echo "RS_PUB_KEY length: $($env:RS_PUB_KEY.Length)"
-          echo "VCPKG_ROOT (before build) = $env:VCPKG_ROOT"
+          $root = $env:VCPKG_ROOT
+          Write-Host "VCPKG_ROOT = $root"
+          $hits = Get-ChildItem -Path "$root/installed" -Recurse -Filter 'opus_multistream.h' -ErrorAction SilentlyContinue
+          if (-not $hits) {
+            Write-Host "FATAL: opus_multistream.h not found under $root/installed"
+            Get-ChildItem -Path "$root/installed" -Recurse -ErrorAction SilentlyContinue | Select-Object FullName | Out-Host
+            exit 1
+          }
+          # приоритет статике
+          $hit = $hits | Where-Object { $_.FullName -match 'x64-windows-static' } | Select-Object -First 1
+          if (-not $hit) { $hit = $hits | Where-Object { $_.FullName -match 'x64-windows' } | Select-Object -First 1 }
+          $includeOpus = Split-Path $hit.FullName -Parent       # ...\include\opus
+          $includeBase = Split-Path $includeOpus -Parent        # ...\include
+          # triplet — имя папки под installed
+          $triplet = Split-Path (Split-Path $includeBase -Parent) -Leaf
+          $dyn = if ($triplet -eq 'x64-windows-static') { '0' } else { '1' }
 
-      # ⬇️ Обновлённый сборочный шаг: сохраняем/восстанавливаем VCPKG_ROOT вокруг VsDevCmd
-      - name: Build RustDesk (release, MSVC) with vcpkg (auto static→dynamic)
+          "CHOSEN_TRIPLET=$triplet"            | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "INCLUDE_BASE=$includeBase"          | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "VCPKGRS_DYNAMIC=$dyn"               | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+          Write-Host "Chosen triplet: $triplet"
+          Write-Host "Include base   : $includeBase"
+          Write-Host "VCPKGRS_DYNAMIC: $dyn"
+
+      # Сборка: сохраняем/восстанавливаем VCPKG_ROOT вокруг VsDevCmd, используем CHOSEN_TRIPLET/INCLUDE_BASE
+      - name: Build RustDesk (release, MSVC)
         shell: cmd
         working-directory: rustdesk
         env:
@@ -89,48 +127,30 @@ jobs:
           RELAY_SERVER:      ${{ env.RELAY_SERVER }}
           RS_PUB_KEY:        ${{ env.RS_PUB_KEY }}
         run: |
-          rem 0) Сохраняем VCPKG_ROOT от lukka/run-vcpkg
+          rem 0) Сохраняем VCPKG_ROOT, выставленный lukka/run-vcpkg
           set "_VCPKG_ROOT=%VCPKG_ROOT%"
 
-          rem 1) Активируем MSVC/SDK (это ПЕРЕЗАПИШЕТ VCPKG_ROOT на встроенный путь VS)
+          rem 1) Активируем MSVC/SDK (это может переписать VCPKG_ROOT)
           if exist "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" (
             call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -arch=x64
           ) else (
             call "C:\Program Files\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat" -arch=x64
           )
 
-          rem 2) ВОССТАНАВЛИВАЕМ VCPKG_ROOT на путь, который подготовил lukka/run-vcpkg
+          rem 2) ВОССТАНОВИМ VCPKG_ROOT
           set "VCPKG_ROOT=%_VCPKG_ROOT%"
           echo Restored VCPKG_ROOT=%VCPKG_ROOT%
 
-          rem 3) Автовыбор триплета по наличию заголовков Opus
-          set STATIC_TRIPLET=x64-windows-static
-          set DYNAMIC_TRIPLET=x64-windows
-
-          if exist "%VCPKG_ROOT%\installed\%STATIC_TRIPLET%\include\opus\opus_multistream.h" (
-            echo === Using STATIC triplet ===
-            set VCPKG_DEFAULT_TRIPLET=%STATIC_TRIPLET%
-            set VCPKG_TARGET_TRIPLET=%STATIC_TRIPLET%
-            set VCPKGRS_DYNAMIC=0
-            set BINDGEN_EXTRA_CLANG_ARGS=-I"%VCPKG_ROOT%\installed\%STATIC_TRIPLET%\include"
-          ) else if exist "%VCPKG_ROOT%\installed\%DYNAMIC_TRIPLET%\include\opus\opus_multistream.h" (
-            echo === Using DYNAMIC triplet (fallback) ===
-            set VCPKG_DEFAULT_TRIPLET=%DYNAMIC_TRIPLET%
-            set VCPKG_TARGET_TRIPLET=%DYNAMIC_TRIPLET%
-            set VCPKGRS_DYNAMIC=1
-            set BINDGEN_EXTRA_CLANG_ARGS=-I"%VCPKG_ROOT%\installed\%DYNAMIC_TRIPLET%\include"
-          ) else (
-            echo FATAL: Opus headers not found under VCPKG_ROOT=%VCPKG_ROOT%
-            dir "%VCPKG_ROOT%\installed"
-            exit /b 1
-          )
+          rem 3) Применяем найденный триплет/инклюды
+          set VCPKG_DEFAULT_TRIPLET=%CHOSEN_TRIPLET%
+          set VCPKG_TARGET_TRIPLET=%CHOSEN_TRIPLET%
+          set BINDGEN_EXTRA_CLANG_ARGS=-I"%INCLUDE_BASE%"
 
           echo VCPKG_DEFAULT_TRIPLET=%VCPKG_DEFAULT_TRIPLET%
           echo VCPKG_TARGET_TRIPLET=%VCPKG_TARGET_TRIPLET%
           echo VCPKGRS_DYNAMIC=%VCPKGRS_DYNAMIC%
           echo BINDGEN_EXTRA_CLANG_ARGS=%BINDGEN_EXTRA_CLANG_ARGS%
 
-          rem 4) Сборка клиента
           rustc --version
           cargo --version
           set CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_DEBUG=true
