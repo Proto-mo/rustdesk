@@ -1,4 +1,4 @@
-name: Build RustDesk Client (custom server, vcpkg manifest via setup-vcpkg, MSVC)
+name: Build RustDesk Client (custom server, vcpkg via lukka, MSVC)
 
 on:
   workflow_dispatch:
@@ -7,10 +7,11 @@ jobs:
   build-win-msvc:
     runs-on: windows-latest
     env:
-      # Задай в Settings → Actions → Variables:
-      RENDEZVOUS_SERVER: ${{ vars.RENDEZVOUS_SERVER }}   # напр.: hbbs.example.com:21115
+      # === твои переменные (Settings → Actions → Variables) ===
+      RENDEZVOUS_SERVER: ${{ vars.RENDEZVOUS_SERVER }}   # hbbs: host:port
       RS_PUB_KEY:        ${{ vars.RS_PUB_KEY }}          # ssh-ed25519 AAAA... (одной строкой)
-      RELAY_SERVER:      ${{ vars.RELAY_SERVER }}        # опц.: hbbr.example.com:21117
+      RELAY_SERVER:      ${{ vars.RELAY_SERVER }}        # опц.: hbbr:port
+      # Диагностика/стабильность
       RUST_BACKTRACE: "1"
       CARGO_TERM_COLOR: always
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
@@ -19,12 +20,13 @@ jobs:
       - name: Checkout this CI repo
         uses: actions/checkout@v4
 
+      # Чистим хвосты от прошлых прогонов
       - name: Cleanup previous run
         shell: cmd
         run: |
           if exist rustdesk rmdir /s /q rustdesk
 
-      # Клонируем ИМЕННО клиент rustdesk и инициализируем сабмодули из корня
+      # Клонируем ИМЕННО клиент rustdesk и инициализируем сабмодули
       - name: Clone RustDesk (client) + submodules
         shell: cmd
         run: |
@@ -49,7 +51,7 @@ jobs:
         shell: pwsh
         run: flutter doctor -v
 
-      # Инструменты C/C++ (через cmd, без refreshenv)
+      # Инструменты C/C++ через Chocolatey (через cmd — без refreshenv)
       - name: Install build tools (cmd)
         shell: cmd
         run: |
@@ -58,42 +60,38 @@ jobs:
           cmake --version
           ninja --version
 
-      # === vcpkg через официальный экшен (ставит VCPKG_ROOT и кеширует) ===
-      # Ставим зависимости из rustdesk/vcpkg.json для СТАТИЧЕСКОГО триплета
+      # === VCPKG через lukka/setup-vcpkg (manifest mode) ===
+      # Ставим зависимости из rustdesk/vcpkg.json для статического триплета
       - name: setup-vcpkg (x64-windows-static)
-        uses: microsoft/setup-vcpkg@v1
+        uses: lukka/setup-vcpkg@v1
         with:
-          # куда положить vcpkg (стабильный путь, кэшируется)
+          vcpkgGitCommitId: ''   # опционально: зафиксируй конкретный commit vcpkg для воспроизводимости
           vcpkgDirectory: ${{ runner.temp }}\vcpkg
-          # каталог с vcpkg.json (manifest mode)
-          workingDirectory: rustdesk
-          # нужный триплет
+          # manifest-режим: работаем из каталога rustdesk, где лежит vcpkg.json
+          vcpkgJsonGlob: rustdesk/vcpkg.json
           triplet: x64-windows-static
-          # к ключу кеша добавим метку, чтобы не путать с динамикой
           appendedCacheKey: rustdesk-static
 
-      # И ставим зависимости для ДИНАМИЧЕСКОГО триплета (fallback)
+      # И зависимости для динамического триплета (fallback)
       - name: setup-vcpkg (x64-windows)
-        uses: microsoft/setup-vcpkg@v1
+        uses: lukka/setup-vcpkg@v1
         with:
+          vcpkgGitCommitId: ''
           vcpkgDirectory: ${{ runner.temp }}\vcpkg
-          workingDirectory: rustdesk
+          vcpkgJsonGlob: rustdesk/vcpkg.json
           triplet: x64-windows
           appendedCacheKey: rustdesk-dynamic
 
-      # Печать кастомных переменных (проверка)
+      # (Опционально) Быстрая проверка наших переменных
       - name: Print custom vars
         shell: pwsh
         run: |
           echo "RENDEZVOUS_SERVER=$env:RENDEZVOUS_SERVER"
           if ($env:RELAY_SERVER) { echo "RELAY_SERVER=$env:RELAY_SERVER" }
           echo "RS_PUB_KEY length: $($env:RS_PUB_KEY.Length)"
-          echo "VCPKG_ROOT (from setup-vcpkg) = $env:VCPKG_ROOT"
+          echo "VCPKG_ROOT (from lukka) = $env:VCPKG_ROOT"
 
-      # Сборка В ОДНОМ cmd-шаге:
-      # 1) VsDevCmd (MSVC/SDK);
-      # 2) авто-выбор статик/динамик по наличию opus_multistream.h в $VCPKG_ROOT\installed\<triplet>\include\opus;
-      # 3) сборка rustdesk.exe
+      # Сборка в одном cmd-шаге: VsDevCmd + выбор статик/динамик по наличию opus_multistream.h
       - name: Build RustDesk (release, MSVC) with vcpkg (auto static→dynamic)
         shell: cmd
         working-directory: rustdesk
@@ -102,18 +100,17 @@ jobs:
           RELAY_SERVER:      ${{ env.RELAY_SERVER }}
           RS_PUB_KEY:        ${{ env.RS_PUB_KEY }}
         run: |
-          rem 1) Активируем MSVC/SDK
+          rem 1) Активируем MSVC/Windows SDK
           if exist "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" (
             call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -arch=x64
           ) else (
             call "C:\Program Files\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat" -arch=x64
           )
 
-          rem 2) setup-vcpkg уже выставил VCPKG_ROOT и поставил пакеты для двух триплетов
+          rem 2) Автовыбор триплета по наличию заголовков Opus
           set STATIC_TRIPLET=x64-windows-static
           set DYNAMIC_TRIPLET=x64-windows
 
-          rem 3) Автоматический выбор по наличию заголовков Opus:
           if exist "%VCPKG_ROOT%\installed\%STATIC_TRIPLET%\include\opus\opus_multistream.h" (
             echo === Using STATIC triplet ===
             set VCPKG_DEFAULT_TRIPLET=%STATIC_TRIPLET%
@@ -127,7 +124,7 @@ jobs:
             set VCPKGRS_DYNAMIC=1
             set BINDGEN_EXTRA_CLANG_ARGS=-I%VCPKG_ROOT%\installed\%DYNAMIC_TRIPLET%\include
           ) else (
-            echo FATAL: Opus headers not found in either triplet under VCPKG_ROOT=%VCPKG_ROOT%
+            echo FATAL: Opus headers not found under VCPKG_ROOT=%VCPKG_ROOT%
             dir "%VCPKG_ROOT%\installed"
             exit /b 1
           )
@@ -138,7 +135,7 @@ jobs:
           echo VCPKGRS_DYNAMIC=%VCPKGRS_DYNAMIC%
           echo BINDGEN_EXTRA_CLANG_ARGS=%BINDGEN_EXTRA_CLANG_ARGS%
 
-          rem 4) Сборка клиента
+          rem 3) Сборка клиента
           rustc --version
           cargo --version
           set CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_DEBUG=true
