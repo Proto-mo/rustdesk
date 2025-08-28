@@ -1,0 +1,10 @@
+name: Sanity
+
+on:
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: windows-latest
+    steps:
+      - run: echo It works!
