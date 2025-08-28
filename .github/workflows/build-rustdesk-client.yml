@@ -1,4 +1,4 @@
-name: Client (custom server, vcpkg classic+manifest via lukka, MSVC)
+name: Build Client (custom server, vcpkg classic+manifest via lukka, MSVC)
 
 on:
   workflow_dispatch:
