@@ -1,4 +1,4 @@
-name: Build Client (custom server, vcpkg classic+manifest via lukka, MSVC)
+name: Build RustDesk Client (custom server, vcpkg via lukka/run-vcpkg, MSVC)
 
 on:
   workflow_dispatch:
@@ -53,11 +53,11 @@ jobs:
           cmake --version
           ninja --version
 
-      # vcpkg bootstrap/cache через lukka (создаёт VCPKG_ROOT и кэш)
+      # vcpkg bootstrap/cache via lukka
       - name: setup-vcpkg (x64-windows-static)
         uses: lukka/run-vcpkg@v11
         with:
-          vcpkgGitCommitId: ''
+          vcpkgGitCommitId: ''                 # optional pin
           vcpkgDirectory: ${{ runner.temp }}\vcpkg
           vcpkgJsonGlob: rustdesk/vcpkg.json
           triplet: x64-windows-static
@@ -72,23 +72,24 @@ jobs:
           triplet: x64-windows
           appendedCacheKey: rustdesk-dynamic
 
-      # >>> КЛЮЧЕВОЕ ДОБАВЛЕНИЕ <<<
-      # Форсируем classic-mode (без manifests) и явно ставим нужные порты.
-      - name: vcpkg classic install (static: opus, libvpx, libyuv)
+      # ⬇️ ЯВНО ставим зависимости в manifest-режиме из rustdesk/ (обеe триплета), чтобы точно появились headers под %VCPKG_ROOT%\installed
+      - name: vcpkg install (manifest, static)
         shell: cmd
+        working-directory: rustdesk
         run: |
-          set VCPKG_FEATURE_FLAGS=-manifests
-          "%VCPKG_ROOT%\vcpkg.exe" install opus:x64-windows-static libvpx:x64-windows-static libyuv:x64-windows-static
+          "%VCPKG_ROOT%\vcpkg.exe" install --triplet x64-windows-static
+          echo ---- Installed (static) ----
           if exist "%VCPKG_ROOT%\installed\x64-windows-static\include\opus" dir "%VCPKG_ROOT%\installed\x64-windows-static\include\opus"
 
-      - name: vcpkg classic install (dynamic: opus)
+      - name: vcpkg install (manifest, dynamic)
         shell: cmd
+        working-directory: rustdesk
         run: |
-          set VCPKG_FEATURE_FLAGS=-manifests
-          "%VCPKG_ROOT%\vcpkg.exe" install opus:x64-windows
+          "%VCPKG_ROOT%\vcpkg.exe" install --triplet x64-windows
+          echo ---- Installed (dynamic) ----
           if exist "%VCPKG_ROOT%\installed\x64-windows\include\opus" dir "%VCPKG_ROOT%\installed\x64-windows\include\opus"
 
-      # Автопоиск opus_multistream.h и экспорт CHOSEN_TRIPLET/INCLUDE_BASE/VCPKGRS_DYNAMIC
+      # Автопоиск заголовков opus_multistream.h и выбор триплета
       - name: Locate Opus headers and export env
         shell: pwsh
         run: |
@@ -100,22 +101,24 @@ jobs:
             Get-ChildItem -Path "$root/installed" -Recurse -ErrorAction SilentlyContinue | Select-Object FullName | Out-Host
             exit 1
           }
-          $hit = ($hits | Where-Object { $_.FullName -match 'x64-windows-static' } | Select-Object -First 1)
+          # приоритет статике
+          $hit = $hits | Where-Object { $_.FullName -match 'x64-windows-static' } | Select-Object -First 1
           if (-not $hit) { $hit = $hits | Where-Object { $_.FullName -match 'x64-windows' } | Select-Object -First 1 }
-          $includeOpus = Split-Path $hit.FullName -Parent
-          $includeBase = Split-Path $includeOpus -Parent
+          $includeOpus = Split-Path $hit.FullName -Parent       # ...\include\opus
+          $includeBase = Split-Path $includeOpus -Parent        # ...\include
+          # triplet — имя папки под installed
           $triplet = Split-Path (Split-Path $includeBase -Parent) -Leaf
           $dyn = if ($triplet -eq 'x64-windows-static') { '0' } else { '1' }
 
-          "CHOSEN_TRIPLET=$triplet"   | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "INCLUDE_BASE=$includeBase" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "VCPKGRS_DYNAMIC=$dyn"      | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CHOSEN_TRIPLET=$triplet"            | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "INCLUDE_BASE=$includeBase"          | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "VCPKGRS_DYNAMIC=$dyn"               | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
           Write-Host "Chosen triplet: $triplet"
           Write-Host "Include base   : $includeBase"
           Write-Host "VCPKGRS_DYNAMIC: $dyn"
 
-      # Сборка: сохраняем/восстанавливаем VCPKG_ROOT вокруг VsDevCmd, применяем найденные значения
+      # Сборка: сохраняем/восстанавливаем VCPKG_ROOT вокруг VsDevCmd, используем CHOSEN_TRIPLET/INCLUDE_BASE
       - name: Build RustDesk (release, MSVC)
         shell: cmd
         working-directory: rustdesk
@@ -124,21 +127,21 @@ jobs:
           RELAY_SERVER:      ${{ env.RELAY_SERVER }}
           RS_PUB_KEY:        ${{ env.RS_PUB_KEY }}
         run: |
-          rem 0) Сохраняем VCPKG_ROOT от lukka/run-vcpkg
+          rem 0) Сохраняем VCPKG_ROOT, выставленный lukka/run-vcpkg
           set "_VCPKG_ROOT=%VCPKG_ROOT%"
 
-          rem 1) Активируем MSVC/SDK (это перезапишет VCPKG_ROOT)
+          rem 1) Активируем MSVC/SDK (это может переписать VCPKG_ROOT)
           if exist "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" (
             call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -arch=x64
           ) else (
             call "C:\Program Files\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat" -arch=x64
           )
 
-          rem 2) Восстанавливаем VCPKG_ROOT
+          rem 2) ВОССТАНОВИМ VCPKG_ROOT
           set "VCPKG_ROOT=%_VCPKG_ROOT%"
           echo Restored VCPKG_ROOT=%VCPKG_ROOT%
 
-          rem 3) Применяем выбранный триплет/инклюды
+          rem 3) Применяем найденный триплет/инклюды
           set VCPKG_DEFAULT_TRIPLET=%CHOSEN_TRIPLET%
           set VCPKG_TARGET_TRIPLET=%CHOSEN_TRIPLET%
           set BINDGEN_EXTRA_CLANG_ARGS=-I"%INCLUDE_BASE%"
