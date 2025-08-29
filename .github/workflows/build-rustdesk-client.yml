@@ -75,7 +75,7 @@ jobs:
           triplet: x64-windows
           appendedCacheKey: rustdesk-dynamic
 
-      # зафиксировать единый VCPKG_ROOT
+      # Зафиксировать единый VCPKG_ROOT для всех следующих шагов
       - name: Pin VCPKG_ROOT to $RUNNER_TEMP\vcpkg
         shell: pwsh
         run: |
@@ -83,24 +83,19 @@ jobs:
           "VCPKG_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Write-Host "Pinned VCPKG_ROOT to $root"
 
-      # classic-mode установки: ИМЕНА ШАГОВ ЗАКАВЫЧЕНЫ!
+      # ВАЖНО: classic-mode + запуск не из папки с манифестом (cd %VCPKG_ROOT%)
       - name: "vcpkg classic install (static: opus, libvpx, libyuv)"
         shell: cmd
         run: |
-          set VCPKG_FEATURE_FLAGS=-manifests
-          if not exist "%VCPKG_ROOT%" (
-            echo FATAL: VCPKG_ROOT not found: %VCPKG_ROOT%
-            exit /b 1
-          )
-          dir "%VCPKG_ROOT%"
-          "%VCPKG_ROOT%\vcpkg.exe" install opus:x64-windows-static libvpx:x64-windows-static libyuv:x64-windows-static
+          cd /d "%VCPKG_ROOT%"
+          "%VCPKG_ROOT%\vcpkg.exe" install --classic opus:x64-windows-static libvpx:x64-windows-static libyuv:x64-windows-static
           if exist "%VCPKG_ROOT%\installed\x64-windows-static\include\opus" dir "%VCPKG_ROOT%\installed\x64-windows-static\include\opus"
 
       - name: "vcpkg classic install (dynamic: opus)"
         shell: cmd
         run: |
-          set VCPKG_FEATURE_FLAGS=-manifests
-          "%VCPKG_ROOT%\vcpkg.exe" install opus:x64-windows
+          cd /d "%VCPKG_ROOT%"
+          "%VCPKG_ROOT%\vcpkg.exe" install --classic opus:x64-windows
           if exist "%VCPKG_ROOT%\installed\x64-windows\include\opus" dir "%VCPKG_ROOT%\installed\x64-windows\include\opus"
 
       - name: Locate Opus headers and export env
