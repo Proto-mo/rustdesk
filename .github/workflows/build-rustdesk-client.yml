@@ -138,7 +138,7 @@ jobs:
         working-directory: rustdesk
         env:
           RENDEZVOUS_SERVER: ${{ env.RENDEZVOUS_SERVER }}
-          RELAY_SERVER:      ${{ env:RELAY_SERVER }}
+          RELAY_SERVER:      ${{ env.RELAY_SERVER }}
           RS_PUB_KEY:        ${{ env.RS_PUB_KEY }}
         run: |
           rem 0) Save VCPKG_ROOT
