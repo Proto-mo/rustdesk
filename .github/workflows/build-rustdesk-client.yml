@@ -2,7 +2,9 @@ name: Build RustDesk Client (custom server, MSVC, reliable vcpkg)
 
 on:
   workflow_dispatch:
-
+  push:
+    paths:
+      - '.github/workflows/build-rustdesk-client.yml'
 jobs:
   build-win-msvc:
     runs-on: windows-latest
